@@ -5,10 +5,10 @@ edition = "2024"
 
 authors = ["Nik Gurtovoy <niikage7@gmail.com>"]
 description = "A cyclic data structure that allows the oldest value to be overwritten by the newest one"
-keywords = ["cyclic", "non-resizable", "ordered", "queue"]
+keywords = ["cyclic", "ordered", "queue"]
 categories = ["data-structures"]
 license = "MIT"
-repository = "github.com/niikage7/onlyq"
+repository = "https://github.com/niikage7/onlyq"
 readme = "README.md"
 
 [dependencies]
