@@ -2,10 +2,13 @@
 A cyclic data structure that allows the oldest value to be overwritten by the newest one.
 
 [![Crates.io][crates-badge]][crates-url]
+[![Docs.io][docs-badge]][docs-url]
 [![MIT licensed][mit-badge]][mit-url]
 
 [crates-badge]: https://img.shields.io/crates/v/onlyq.svg
 [crates-url]: https://crates.io/crates/onlyq
+[docs-badge]: https://img.shields.io/docsrs/onlyq
+[docs-url]: https://docs.rs/onlyq
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
 [mit-url]: https://github.com/niikage7/onlyq/blob/main/LICENSE
 
