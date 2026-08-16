@@ -1,0 +1,14 @@
+[package]
+name = "onlyq"
+version = "0.1.0"
+edition = "2024"
+
+authors = ["Nik Gurtovoy <niikage7@gmail.com>"]
+description = "A cyclic data structure that allows the oldest value to be overwritten by the newest one"
+keywords = ["cyclic", "non-resizable", "ordered", "queue"]
+categories = ["data-structures"]
+license = "MIT"
+repository = "github.com/niikage7/onlyq"
+readme = "README.md"
+
+[dependencies]
