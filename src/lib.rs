@@ -38,16 +38,15 @@
 //! See [`OnlyQueue`] for the full API and its safety invariants.
 
 mod errors;
-mod utils;
+mod raw_queue;
 
 pub use crate::errors::OnlyqError;
-use crate::utils::{alloc_nonnull, dealloc_nonnull};
+use crate::raw_queue::RawQueue;
+
 use std::{
     fmt::{Debug, Display},
     mem::{self, MaybeUninit},
-    ops::Deref,
-    ptr::{self, NonNull},
-    slice,
+    ptr,
 };
 
 /// A fixed-capacity, heap-allocated cyclic queue.
@@ -111,18 +110,15 @@ use std::{
 /// are always uninitialized. This is established in [`new`](Self::new)
 /// and every method that touches `len` (`push`, `clear`, `Drop`) is
 /// responsible for leaving it intact before returning.
-#[derive(Debug)]
 pub struct OnlyQueue<T> {
     /// Backing allocation of `cap` slots. Slots `0..len` are always
     /// initialized; the rest are logically uninitialized
-    buf: NonNull<MaybeUninit<T>>,
+    raw: RawQueue<T>,
     /// Number of initialized slots. Grows from 0 up to `cap` while the
     /// buffer fills for the first time, then stays at `cap` forever
     /// (elements are replaced in place, not appended) until `clear()`
     /// resets it to 0
     len: usize,
-    /// Maximum amount of elements
-    cap: usize,
     /// Physical index of the oldest element - the slot that will be
     /// overwritten next once the buffer is full. Unused (stays 0) while
     /// the buffer is still filling for the first time, since writes
@@ -186,15 +182,12 @@ impl<T> OnlyQueue<T> {
     /// * `T` must not be zero-sized - this is not currently supported and
     ///   is left unchecked by this function.
     pub unsafe fn new_unchecked(cap: usize) -> Self {
-        // SAFETY: Caller guarantees T is not a ZST.
-        // We can allocate MaybeUninit<T> instead of T, because it is guaranteed that
-        // MaybeUninit<T> has the same layout as T
-        let buf = unsafe { alloc_nonnull::<MaybeUninit<T>>(cap) };
+        // SAFETY: Caller guarantees T is not a ZST and cap > 0.
+        let raw = unsafe { RawQueue::<T>::new(cap) };
 
         Self {
-            buf,
+            raw,
             len: 0,
-            cap,
             idx: 0,
         }
     }
@@ -212,7 +205,7 @@ impl<T> OnlyQueue<T> {
     /// Returns the queue's fixed capacity, set at construction and never
     /// changed afterwards.
     pub const fn cap(&self) -> usize {
-        self.cap
+        self.raw.cap
     }
 
     /// Returns the physical slot index of the oldest element - the slot
@@ -238,18 +231,7 @@ impl<T> OnlyQueue<T> {
 
         // SAFETY: we checked that idx < self.len, and by invariant every slot
         // in 0..self.len holds an initialized T.
-        Some(unsafe { self.read_ref_unchecked(idx).assume_init_ref() })
-    }
-
-    /// Returns a reference to the `MaybeUninit<T>` at physical slot `idx`,
-    /// without bounds-checking.
-    ///
-    /// # Safety
-    /// `idx` must be `< self.len` - by the struct's invariant, every such
-    /// slot holds an initialized `T`.
-    #[inline]
-    unsafe fn read_ref_unchecked(&self, idx: usize) -> &MaybeUninit<T> {
-        unsafe { &*self.buf.as_ptr().add(idx) }
+        Some(unsafe { self.raw.read_ref(idx).assume_init_ref() })
     }
 
     /// Returns every currently stored element as a slice, in physical
@@ -259,7 +241,7 @@ impl<T> OnlyQueue<T> {
         // so reinterpreting the first self.len `MaybeUninit<T>` slots as `T`
         // is sound. `transmute` is valid because MaybeUninit<T> and T share layout.
         unsafe {
-            let items = slice::from_raw_parts(self.buf.as_ptr(), self.len);
+            let items = self.raw.as_slice(self.len);
             mem::transmute::<&[MaybeUninit<T>], &[T]>(items)
         }
     }
@@ -293,13 +275,13 @@ impl<T> OnlyQueue<T> {
     /// assert_eq!(third, Some(1))
     /// ```
     pub fn push(&mut self, item: T) -> Option<T> {
-        if self.len < self.cap {
+        if self.len < self.cap() {
             // Buffer isn't full yet: append at the next free physical slot.
 
             // SAFETY: we checked that self.len < self.cap, so slot self.len
             // is within the allocation and not yet initialized.
             unsafe {
-                self.write_unchecked(self.len, MaybeUninit::new(item));
+                self.raw.write(self.len, MaybeUninit::new(item));
             }
 
             self.len += 1;
@@ -307,47 +289,19 @@ impl<T> OnlyQueue<T> {
         }
 
         // Buffer is full (self.len == self.cap): overwrite the oldest element.
-        let target_idx = self.idx % self.cap;
+        let target_idx = self.idx % self.cap();
 
         // SAFETY: this branch only runs once self.len == self.cap, so every
         // slot in 0..self.cap is initialized; target_idx is always < self.cap
         // by construction, so it names an initialized slot.
         let old = unsafe {
-            self.replace_unchecked(target_idx, MaybeUninit::new(item))
+            self.raw
+                .replace(target_idx, MaybeUninit::new(item))
                 .assume_init()
         };
 
-        self.idx = (target_idx + 1) % self.cap;
+        self.idx = (target_idx + 1) % self.cap();
         Some(old)
-    }
-
-    /// Writes `item` into physical slot `idx`, overwriting whatever was
-    /// there without reading or dropping it.
-    ///
-    /// # Safety
-    /// `idx` must be `< self.cap` (within the allocation). Unlike
-    /// [`replace_unchecked`](Self::replace_unchecked), this does **not**
-    /// drop or return the slot's previous contents - calling it on a slot
-    /// that already holds an initialized `T` leaks that value instead of
-    /// dropping it. Only call this on a slot the invariant guarantees is
-    /// currently uninitialized (i.e. `idx >= self.len`).
-    #[inline]
-    unsafe fn write_unchecked(&mut self, idx: usize, item: MaybeUninit<T>) {
-        unsafe { ptr::write(self.buf.as_ptr().add(idx), item) }
-    }
-
-    /// Writes `item` into physical slot `idx` and returns whatever was
-    /// previously stored there, without dropping it.
-    ///
-    /// # Safety
-    /// `idx` must be `< self.cap` (within the allocation). This function
-    /// is sound regardless of whether the slot was previously
-    /// initialized - but the *caller* must only call `assume_init` on the
-    /// returned value if `idx` did in fact name a previously-initialized
-    /// slot; doing so otherwise is undefined behavior.
-    #[inline]
-    unsafe fn replace_unchecked(&mut self, idx: usize, item: MaybeUninit<T>) -> MaybeUninit<T> {
-        unsafe { ptr::replace(self.buf.as_ptr().add(idx), item) }
     }
 
     /// Removes and drops every element in the queue, resetting it to the
@@ -360,7 +314,7 @@ impl<T> OnlyQueue<T> {
             // the slot uninitialized. Resetting self.len to 0 below keeps the
             // invariant "slots 0..self.len are initialized" intact afterwards.
             unsafe {
-                let ptr = self.buf.as_ptr().add(i);
+                let ptr = self.raw.buf.as_ptr().add(i);
                 if mem::needs_drop::<T>() {
                     ptr::drop_in_place(ptr);
                 }
@@ -377,11 +331,21 @@ impl<T> OnlyQueue<T> {
 // Trait impls
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<T> Deref for OnlyQueue<T> {
+// TODO: some methods of the Deref trait may confuse end user.
+// Example: what kind of `last` element will return the `last()` method?
+impl<T> std::ops::Deref for OnlyQueue<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
         self.get_all()
+    }
+}
+
+/// Manually implement `Debug` trait, because implementing it via `derive` requires all fields
+/// to implement Debug, but `RawQueue` does not.
+impl<T: Debug> Debug for OnlyQueue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.get_all())
     }
 }
 
@@ -397,12 +361,8 @@ impl<T: Debug> Display for OnlyQueue<T> {
 /// buffer.
 impl<T> Drop for OnlyQueue<T> {
     fn drop(&mut self) {
-        // SAFETY: self.buf was allocated for self.cap elements of T (see
-        // [`OnlyQueue::new`]), and exactly the first self.len slots are guaranteed
-        // initialized
-        unsafe {
-            dealloc_nonnull(self.buf.cast::<T>(), self.len, self.cap);
-        }
+        self.clear();
+        // dropping self.raw calls its drop, which deallocates all memory
     }
 }
 
@@ -433,13 +393,9 @@ impl<T> TryFrom<Vec<T>> for OnlyQueue<T> {
         // Vec must NOT call its own destructor
         mem::forget(value);
 
-        Ok(Self {
-            // SAFETY: vec ptr is never null
-            buf: unsafe { NonNull::new_unchecked(ptr.cast::<MaybeUninit<T>>()) },
-            len,
-            cap,
-            idx: 0,
-        })
+        // SAFETY: ptr is not null, cap > 0, T is not ZST
+        let raw = unsafe { RawQueue::<T>::new_from_ptr_and_cap(ptr, cap) };
+        Ok(Self { raw, len, idx: 0 })
     }
 }
 
@@ -471,10 +427,6 @@ impl<T: Clone> TryFrom<&[T]> for OnlyQueue<T> {
 #[cfg(test)]
 mod onlyq_tests {
     use crate::{OnlyQueue, errors::OnlyqError};
-
-    ////////////////////////////////////////////////////////////////////////////////
-    // Push tests
-    ////////////////////////////////////////////////////////////////////////////////
 
     ////////////////////////////////////////////////////////////////////////////////
     // Construction tests
@@ -519,6 +471,10 @@ mod onlyq_tests {
         assert!(q.is_err());
         assert_eq!(q.unwrap_err(), OnlyqError::ZeroCapacity);
     }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Push tests
+    ////////////////////////////////////////////////////////////////////////////////
 
     /// Tests cases when user pushes items to empty queue.
     ///
