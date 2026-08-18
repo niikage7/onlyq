@@ -420,6 +420,104 @@ impl<T: Clone> TryFrom<&[T]> for OnlyQueue<T> {
         Ok(queue)
     }
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Iterator
+////////////////////////////////////////////////////////////////////////////////
+
+/// By-value iterator over an [`OnlyQueue`], returned by
+/// [`into_iter`](IntoIterator::into_iter).
+///
+/// Yields every currently stored element exactly once, in **physical slot
+/// order** (`0..len`) - the same order [`get_all`](OnlyQueue::get_all)
+/// uses, not necessarily insertion order (see the struct-level docs on
+/// [`OnlyQueue`]). Dropping this iterator before it's fully consumed still
+/// drops and frees any remaining elements.
+///
+/// # Example
+/// ```
+/// use onlyq::OnlyQueue;
+///
+/// let mut q = OnlyQueue::<i32>::new(3);
+/// q.push(1);
+/// q.push(2);
+/// q.push(3);
+///
+/// let collected: Vec<i32> = q.into_iter().collect();
+/// assert_eq!(collected, vec![1, 2, 3]);
+/// ```
+pub struct IntoIter<T> {
+    /// Owns the backing allocation so it gets deallocated when the
+    /// iterator is dropped; never read from directly.
+    _raw: RawQueue<T>,
+    /// Pointer to the next element to yield.
+    start: *const T,
+    /// One-past-the-end pointer; iteration stops once `start == end`.
+    end: *const T,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.start == self.end {
+            None
+        } else {
+            // SAFETY: start != end, so start is in bounds and, by
+            // OnlyQueue's invariant, names an initialized element that
+            // hasn't been yielded yet. Advancing past it here means it
+            // won't be read again.
+            unsafe {
+                let result = ptr::read(self.start);
+                self.start = self.start.offset(1);
+                Some(result)
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // SAFETY-adjacent: start and end always point into (or one past
+        // the end of) the same allocation, so this is a valid pointer
+        // difference; T is never zero-sized (enforced at construction).
+        let len = (self.end as usize - self.start as usize) / mem::size_of::<T>();
+        (len, Some(len))
+    }
+}
+
+/// Drops every element not yet yielded, then (via the `_raw` field's own
+/// `Drop` impl) deallocates the backing buffer.
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        for _ in &mut *self {}
+    }
+}
+
+impl<T> IntoIterator for OnlyQueue<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    /// Converts the queue into a by-value iterator (see [`IntoIter`]),
+    /// consuming it without cloning any elements.
+    fn into_iter(self) -> Self::IntoIter {
+        // SAFETY: this bitwise-copies the RawQueue's pointer and cap, not
+        // the pointee - `mem::forget(self)` below ensures OnlyQueue::drop
+        // never runs, so this is the copy's only owner and there's no
+        // double-free.
+        let raw = unsafe { ptr::read(&self.raw) };
+        let len = self.len;
+
+        mem::forget(self);
+
+        IntoIter {
+            // SAFETY: raw was just allocated for (or inherited from) a
+            // valid OnlyQueue, so its pointer is valid for `len` reads.
+            start: unsafe { raw.as_ptr() },
+            end: unsafe { raw.as_ptr().add(len) },
+            _raw: raw,
+        }
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Tests
 ////////////////////////////////////////////////////////////////////////////////
@@ -546,6 +644,21 @@ mod onlyq_tests {
 
         let i = q.get(3);
         assert!(i.is_none());
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // Iterator
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /// Tests into_iter functionality
+    #[test]
+    fn into_iter() {
+        let mut q = OnlyQueue::<i32>::new(3);
+        q.push(1);
+        q.push(2);
+        q.push(3);
+
+        assert_eq!(q.into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     ////////////////////////////////////////////////////////////////////////////////

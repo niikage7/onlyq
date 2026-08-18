@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [v0.2.0] - 2026-08-18
+
+### Added
+- `IntoIterator` implementation for `OnlyQueue<T>`, via a new `IntoIter<T>`
+  type. Yields every stored element by value, in physical slot order
+  (same order as `get_all`), without cloning.
+
+
 ## [v0.1.1] - 2026-08-17
 
 ### Added
@@ -16,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal: allocation, pointer arithmetic, and raw reads/writes are now
   handled by a private `RawQueue<T>` type instead of free functions in a
   `utils` module. No public API impact.
+
 
 ## [v0.1.0] - 2026-08-16
 
@@ -38,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ZeroSizedType`), implementing `Display` and `std::error::Error`
 
 
-[Unreleased]: https://github.com/niikage7/onlyq/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/niikage7/onlyq/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/niikage7/onlyq/compare/v0.1.1...v0.2.0
 [v0.1.1]: https://github.com/niikage7/onlyq/compare/v0.1.0...v0.1.1
 [v0.1.0]: https://github.com/niikage7/onlyq/releases/tag/v0.1.0
