@@ -77,6 +77,18 @@ impl<T> RawQueue<T> {
         unsafe { slice::from_raw_parts(self.buf.as_ptr(), len) }
     }
 
+    /// Returns a raw pointer to the start of the buffer, cast to `*mut T`.
+    ///
+    /// # Safety
+    /// The returned pointer is valid for `self.cap` elements, but only the
+    /// first `len` (tracked by the caller, not `RawQueue`) are
+    /// initialized. The caller must not read through this pointer beyond
+    /// that initialized prefix.
+    #[inline]
+    pub(crate) unsafe fn as_ptr(&self) -> *mut T {
+        self.buf.as_ptr().cast::<T>()
+    }
+
     /// Writes `item` into physical slot `idx`, overwriting whatever was
     /// there without reading or dropping it.
     ///
